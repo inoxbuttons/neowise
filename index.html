@@ -8,28 +8,105 @@
     body { max-width: 40rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
     textarea { box-sizing: border-box; display: block; width: 100%; margin: .5rem 0; padding: .5rem; font: inherit; }
     button { padding: .4rem .8rem; font: inherit; }
-    pre { white-space: pre-wrap; }
+    .notice { margin: 1rem 0; padding: .6rem .8rem; border-radius: .4rem; background: #fff4e5; border: 1px solid #f0c27b; }
+    .notice.error { background: #fdecec; border-color: #e8a1a1; }
+    .topic { display: inline-block; padding: .1rem .5rem; border-radius: .3rem; background: #e8f0fe; }
+    .draft { white-space: pre-wrap; margin: .5rem 0; padding: .6rem .8rem; border: 1px solid #ccc; border-radius: .4rem; }
+    .hint { color: #666; font-size: .9rem; }
   </style>
 </head>
 <body>
   <h1>Входящие заявки</h1>
   <form>
     <label for="message">Текст заявки</label>
-    <textarea id="message" rows="4"></textarea>
+    <textarea id="message" rows="4" maxlength="5000"></textarea>
     <button type="submit">Разобрать заявку</button>
   </form>
-  <pre id="result" aria-live="polite"></pre>
+
+  <div aria-live="polite">
+    <p id="notice" class="notice" hidden></p>
+    <section id="result" hidden>
+      <p>Тема: <span id="topic" class="topic"></span></p>
+      <p>Черновик ответа:</p>
+      <div id="draft" class="draft"></div>
+      <p class="hint">Это черновик от AI. Проверьте его перед отправкой клиенту.</p>
+    </section>
+  </div>
+
   <script type="module">
+    const TOPIC_LABELS = { delivery: "Доставка", pricing: "Цены", other: "Другое" };
+
     const form = document.querySelector("form");
+    const button = form.querySelector("button");
+    const message = document.querySelector("#message");
+    const notice = document.querySelector("#notice");
     const result = document.querySelector("#result");
+    const topicEl = document.querySelector("#topic");
+    const draftEl = document.querySelector("#draft");
+
+    let lastRequestId = 0;
+
+    function clearResult() {
+      result.hidden = true;
+      topicEl.textContent = "";
+      draftEl.textContent = "";
+      notice.hidden = true;
+      notice.textContent = "";
+      notice.className = "notice";
+    }
+
+    function showNotice(text, isError = false) {
+      notice.textContent = text;
+      notice.className = isError ? "notice error" : "notice";
+      notice.hidden = false;
+    }
+
+    function showReady({ topic, draft }) {
+      // Ответ модели не доверенный, поэтому только textContent, без innerHTML.
+      topicEl.textContent = TOPIC_LABELS[topic] ?? topic;
+      draftEl.textContent = draft;
+      result.hidden = false;
+    }
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const reply = await fetch("/api/triage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: document.querySelector("#message").value }),
-      });
-      result.textContent = JSON.stringify(await reply.json(), null, 2);
+      const requestId = ++lastRequestId;
+      // Сразу убираем прошлый черновик, чтобы его не отправили по новой заявке.
+      clearResult();
+      button.disabled = true;
+
+      let data = null;
+      try {
+        const reply = await fetch("/api/triage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: message.value }),
+        });
+        data = await reply.json().catch(() => null);
+      } catch {
+        data = null;
+      }
+
+      // Устаревший ответ (пришёл после более нового запроса) игнорируем.
+      if (requestId !== lastRequestId) return;
+      button.disabled = false;
+
+      switch (data?.status) {
+        case "ready":
+          showReady(data);
+          break;
+        case "manual_review":
+          showNotice("AI не смог подготовить ответ. Разберите эту заявку вручную.");
+          break;
+        case "invalid_input":
+          showNotice("Введите текст заявки.");
+          break;
+        case "payload_too_large":
+          showNotice("Текст заявки слишком длинный.");
+          break;
+        default:
+          showNotice("Не удалось связаться с сервером. Попробуйте ещё раз.", true);
+      }
     });
   </script>
 </body>
